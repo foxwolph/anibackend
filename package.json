@@ -1,0 +1,19 @@
+{
+  "name": "anipiece-anikoto-backend",
+  "version": "1.0.0",
+  "description": "Minimal Anikoto streaming backend for AniPiece",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "^1.0.0",
+    "cors": "^2.8.5",
+    "crypto-js": "^4.2.0",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

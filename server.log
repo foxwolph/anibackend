@@ -1,0 +1,7 @@
+AniPiece Anikoto backend running on port 3000
+[getStream] server="Vidstream-2" linkId="MTF1dkFtaW9BRTZPbzJJRElFZUZrOWdjeldjOERLaWNMMXFNbVB3WUJqOGdCT1JkdmlSZzZXQUg2ZjhSZ2RuME5NZTdHNWxTTVpFQ25iWXVmYlEwQldGTktqNU1reFZEQk1vOHVJZi9iNTA0QjhaU2diVklFR3V3ZG1BNkNkRFRsVzR3WUN2RHJtUm1RRDBEVXlwWURwdFFVNm5tdHhTQXpBbm56TDRmd3lrPQ" embedUrl="undefined"
+[getStream] no embedUrl in response: {"status":500,"result":"Bad request"}
+[getStream] server="HD-1" linkId="MTF1dkFtaW9BRTZPbzJJRElFZUZrOWdjeldjOERLaWNMMXFNbVB3WUJqOGdCT1JkdmlSZzZXQUg2ZjhSZ2RuME9qQVVkcnNMbWw5YUNmdUpOUEl1MHNSMklZWWdWY0hvZ0w4aEFjb1NXclBUZm4xa3ZjdGdUeVZIb3VhcjJMWXVST3BGQ3V4UWpscC9uWDZScDk1cndUL3IyWU5nOXFLN2V6YWtqTGo2ODRzbTl0MURpekdhQ2Y2RTNVcXM0TWI2" embedUrl="undefined"
+[getStream] no embedUrl in response: {"status":500,"result":"Bad request"}
+[getStream] server="VidPlay-1" linkId="MTF1dkFtaW9BRTZPbzJJRElFZUZrNHVJWFRVWWRWdU5JYnhuaU95bVRYTDIydkFSU0VLcWFVVi9ycFp6bXJFNDFEWVlkNjZEbVlXU2MyeGRHMWlhc21wRTYxRHBoaE1RUHVYTHZZSXdBcnAvTDE0cTJ1a1RCdC9YUmJtVzUzL0w3Mnk3NCswYlNUZ1JhQ2tsOTJuaE1Lb3NramhCQnBJUWtWVFVncDg0ejRwaUR4VFFhSXRSWUlBbTIwdXJaK1hwZFFnM3pnTWUzaTMrYjIzaXpRbGtIZz09" embedUrl="undefined"
+[getStream] no embedUrl in response: {"status":500,"result":"Bad request"}
