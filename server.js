@@ -178,6 +178,10 @@ async function probeEpisodeCount(anilistId, maxEps = 500) {
 // ROUTES
 // ══════════════════════════════════════════════════════════════
 
+app.get('/', (_req, res) => {
+  res.json({ status: 'ok', version: '3.0.0' });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '3.0.0', source: 'megaplay' });
 });
