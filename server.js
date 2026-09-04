@@ -39,7 +39,7 @@ async function getAnilistInfo(anilistId) {
   if (c) return c;
 
   const query = `query ($id: Int) {
-    Media(id: $id, type: ANIME) { id idMal title { romaji english } episodes }
+    Media(id: $id, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
   }`;
   const res = await anilistClient.post('', { query, variables: { id: anilistId } });
   const m = res.data?.data?.Media;
@@ -50,6 +50,7 @@ async function getAnilistInfo(anilistId) {
     title: m.title?.english || m.title?.romaji || 'Unknown',
     altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title?.romaji ? m.title?.romaji : null,
     totalEpisodes: m.episodes,
+    coverImage: m.coverImage?.large || null,
   };
   cacheSet(ck, result, 86400000);
   return result;
@@ -217,13 +218,14 @@ app.get('/api/info', async (req, res) => {
 
     const episodes = [];
     for (let i = 1; i <= episodeCount; i++) {
-      episodes.push({ num: i, title: `Episode ${i}` });
+      episodes.push({ num: i, title: `Episode ${i}`, thumbnail: alInfo?.coverImage || null });
     }
 
     return res.json({
       anilistId: alInfo?.anilistId ?? parseInt(anilistId) ?? null,
       malId: alInfo?.malId ?? (malId ? parseInt(malId) : null),
       title: alInfo?.title ?? 'Unknown',
+      coverImage: alInfo?.coverImage || null,
       episodeCount,
       episodes,
     });
