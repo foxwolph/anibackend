@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -327,6 +329,52 @@ app.get('/api/watch', async (req, res) => {
   }
 });
 
+// Convert one HLS stream to a single MPEG-TS file for native background downloads.
+app.get('/api/download/hls', (req, res) => {
+  const url = req.query.url;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ error: 'Missing or invalid ?url=' });
+  }
+
+  let ref = `${MEGAPLAY}/`;
+  try {
+    ref = req.query.ref ? new URL(req.query.ref).toString() : ref;
+  } catch {
+    return res.status(400).json({ error: 'Invalid referrer' });
+  }
+
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.setHeader('Content-Disposition', 'attachment; filename="episode.ts"');
+  res.setHeader('Cache-Control', 'no-store');
+
+  const ffmpeg = spawn(ffmpegPath, [
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+    '-user_agent', UA,
+    '-headers', `Referer: ${ref}\r\nOrigin: ${new URL(ref).origin}\r\n`,
+    '-i', url,
+    '-map', '0',
+    '-c', 'copy',
+    '-f', 'mpegts',
+    'pipe:1',
+  ]);
+
+  ffmpeg.stdout.pipe(res);
+  ffmpeg.stderr.on('data', data => console.error('HLS download ffmpeg:', data.toString().trim()));
+  ffmpeg.on('error', error => {
+    console.error('HLS download process failed:', error);
+    if (!res.headersSent) res.status(502).json({ error: 'HLS conversion failed' });
+    else res.destroy(error);
+  });
+  ffmpeg.on('close', code => {
+    if (code !== 0 && !res.destroyed) res.destroy(new Error(`ffmpeg exited with ${code}`));
+  });
+  req.on('close', () => {
+    if (!ffmpeg.killed) ffmpeg.kill('SIGTERM');
+  });
+});
+
 // HLS proxy
 app.get('/api/proxy/hls', async (req, res) => {
   const url = req.query.url;
@@ -365,7 +413,10 @@ app.get('/api/proxy/hls', async (req, res) => {
       }).join('\n');
     }
 
-    res.setHeader('Content-Type', contentType || 'application/octet-stream');
+    res.setHeader(
+      'Content-Type',
+      isM3u8 ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream')
+    );
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Cache-Control', 'public, max-age=30');
     return res.send(body);
