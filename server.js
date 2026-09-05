@@ -12,11 +12,18 @@ app.use(express.json());
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const MEGAPLAY = 'https://megaplay.buzz';
+const FLIKHUB = 'https://api.flikhub.net';
+const JIKAN = 'https://api.jikan.moe/v4';
 
 const anilistClient = axios.create({
   baseURL: 'https://graphql.anilist.co',
   timeout: 10000,
   headers: { 'Content-Type': 'application/json' },
+});
+const jikanClient = axios.create({
+  baseURL: JIKAN,
+  timeout: 10000,
+  headers: { 'User-Agent': UA },
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -76,7 +83,7 @@ async function searchAnilist(query) {
         coverImage { large medium }
         status format
       }
-    }
+
   }`;
   const res = await anilistClient.post('', { query: gql, variables: { search: query } });
   const list = res.data?.data?.Page?.media ?? [];
@@ -88,6 +95,55 @@ async function searchAnilist(query) {
     episodes: m.episodes ?? null,
     status: m.status,
     format: m.format,
+  }));
+  cacheSet(ck, results, 300000);
+  return results;
+}
+
+async function getAnilistInfoByMalId(malId) {
+  const ck = `al-mal:${malId}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  const query = `query ($idMal: Int) {
+    Media(idMal: $idMal, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
+  }`;
+  const res = await anilistClient.post('', { query, variables: { idMal: malId } });
+  const m = res.data?.data?.Media;
+  if (!m) return null;
+  const result = {
+    anilistId: m.id, malId: m.idMal, title: m.title?.english || m.title?.romaji || 'Unknown',
+    altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title.romaji ? m.title.romaji : null,
+    totalEpisodes: m.episodes, coverImage: m.coverImage?.large || null,
+  };
+  cacheSet(ck, result, 86400000);
+  return result;
+}
+
+async function getJikanInfo(malId) {
+  const ck = `jikan:${malId}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  const res = await jikanClient.get(`/anime/${malId}/full`);
+  const a = res.data?.data;
+  if (!a) return null;
+  const result = {
+    anilistId: null, malId: a.mal_id, title: a.title_english || a.title || 'Unknown',
+    altTitle: a.title_english && a.title ? a.title : null, totalEpisodes: a.episodes,
+    coverImage: a.images?.jpg?.large_image_url || a.images?.jpg?.image_url || null,
+  };
+  cacheSet(ck, result, 86400000);
+  return result;
+}
+
+async function searchJikan(query) {
+  const ck = `jikan-search:${query.toLowerCase().trim()}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  const res = await jikanClient.get('/anime', { params: { q: query, limit: 10, sfw: true } });
+  const results = (res.data?.data || []).map(a => ({
+    id: null, malId: a.mal_id ?? null, title: a.title_english || a.title,
+    coverImage: a.images?.jpg?.large_image_url || a.images?.jpg?.image_url || '',
+    episodes: a.episodes ?? null, status: a.status, format: a.type,
   }));
   cacheSet(ck, results, 300000);
   return results;
@@ -147,6 +203,36 @@ async function getStreamFromMegaplay(anilistId, episode, language = 'sub') {
     return result;
   } catch (e) {
     console.error(`[megaplay] Error anilistId=${anilistId} ep=${episode}:`, e.message);
+    return null;
+  }
+
+}
+
+async function getStreamFromFlikHub(malId, episode, language = 'sub') {
+  const ck = `flikhub:${malId}:${episode}:${language}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  try {
+    const res = await axios.get(`${FLIKHUB}/megaplay`, {
+      params: { mal: malId, ep: episode, type: language },
+      headers: { 'User-Agent': UA },
+      timeout: 12000,
+    });
+    const data = res.data;
+    const m3u8 = data?.m3u8 || data?.sources?.file || data?.file;
+    if (!m3u8) return null;
+    const result = {
+      m3u8,
+      subtitles: (data.tracks || data.subtitles || []).filter(t => t?.file || t?.url).map(t => ({
+        lang: t.label || t.lang || 'Unknown', url: t.file || t.url,
+        default: Boolean(t.default), kind: t.kind || 'captions',
+      })),
+      intro: data.intro || null, outro: data.outro || null,
+    };
+    cacheSet(ck, result, 300000);
+    return result;
+  } catch (e) {
+    console.error(`[flikhub] Error malId=${malId} ep=${episode}:`, e.message);
     return null;
   }
 }
@@ -237,8 +323,14 @@ app.get('/api/search', async (req, res) => {
   const q = req.query.q;
   if (!q) return res.status(400).json({ error: 'Missing ?q=' });
   try {
-    const results = await searchAnilist(q);
-    return res.json({ query: q, count: results.length, results, source: 'anilist' });
+    try {
+      const results = await searchAnilist(q);
+      return res.json({ query: q, count: results.length, results, source: 'anilist' });
+    } catch (anilistError) {
+      console.error('[anilist] Search failed, using Jikan:', anilistError.message);
+      const results = await searchJikan(q);
+      return res.json({ query: q, count: results.length, results, source: 'jikan' });
+    }
   } catch (e) {
     return res.status(500).json({ error: 'Search failed', detail: e?.message });
   }
@@ -250,18 +342,27 @@ app.get('/api/info', async (req, res) => {
   if (!anilistId && !malId) return res.status(400).json({ error: 'Provide ?anilistId= or ?malId=' });
   try {
     let alInfo = null;
+    let jikanInfo = null;
     if (anilistId) {
       alInfo = await getAnilistInfo(parseInt(anilistId));
       if (!alInfo) return res.status(404).json({ error: 'Anime not found on AniList' });
+    } else if (malId) {
+      const parsedMalId = parseInt(malId);
+      try { alInfo = await getAnilistInfoByMalId(parsedMalId); } catch (e) {
+        console.error('[anilist] MAL lookup failed, using Jikan:', e.message);
+      }
+      if (!alInfo) jikanInfo = await getJikanInfo(parsedMalId);
+      if (!alInfo && !jikanInfo) return res.status(404).json({ error: 'Anime not found' });
     }
 
-    const id = alInfo?.anilistId ?? parseInt(anilistId);
-    const totalEps = alInfo?.totalEpisodes;
+    const id = alInfo?.anilistId ?? (anilistId ? parseInt(anilistId) : null);
+    const info = alInfo || jikanInfo;
+    const totalEps = info?.totalEpisodes;
 
     let episodeCount = totalEps;
     // Always probe if AniList count is missing, 0, or suspiciously low (< 200)
     // This catches shows like One Piece where AniList reports wrong count
-    if (!episodeCount || episodeCount < 200) {
+    if (id && (!episodeCount || episodeCount < 200)) {
       const probedCount = await probeEpisodeCount(id, 1500);
       if (probedCount > (episodeCount || 0)) {
         episodeCount = probedCount;
@@ -270,18 +371,18 @@ app.get('/api/info', async (req, res) => {
 
     if (!episodeCount) return res.status(404).json({ error: 'No episodes found on streaming source' });
 
-    const hasDub = await probeDubAvailability(id);
+    const hasDub = id ? await probeDubAvailability(id) : false;
 
     const episodes = [];
     for (let i = 1; i <= episodeCount; i++) {
-      episodes.push({ num: i, title: `Episode ${i}`, thumbnail: alInfo?.coverImage || null });
+      episodes.push({ num: i, title: `Episode ${i}`, thumbnail: info?.coverImage || null });
     }
 
     return res.json({
-      anilistId: alInfo?.anilistId ?? parseInt(anilistId) ?? null,
-      malId: alInfo?.malId ?? (malId ? parseInt(malId) : null),
-      title: alInfo?.title ?? 'Unknown',
-      coverImage: alInfo?.coverImage || null,
+      anilistId: info?.anilistId ?? (anilistId ? parseInt(anilistId) : null),
+      malId: info?.malId ?? (malId ? parseInt(malId) : null),
+      title: info?.title ?? 'Unknown',
+      coverImage: info?.coverImage || null,
       episodeCount,
       hasDub,
       episodes,
@@ -301,24 +402,37 @@ app.get('/api/watch', async (req, res) => {
 
   try {
     const id = anilistId ? parseInt(anilistId) : null;
-    if (!id) return res.status(400).json({ error: 'anilistId is required for streaming' });
+    let mal = malId ? parseInt(malId) : null;
+    let info = null;
+    if (id || mal) {
+      try {
+        info = id ? await getAnilistInfo(id) : await getAnilistInfoByMalId(mal);
+        if (!mal) mal = info?.malId || null;
+      } catch (e) {
+        console.error('[anilist] Info lookup failed:', e.message);
+      }
+    }
+    if (!id && !mal) return res.status(400).json({ error: 'A valid anilistId or malId is required for streaming' });
 
-    const stream = await getStreamFromMegaplay(id, epNum, type);
+    let stream = mal ? await getStreamFromFlikHub(mal, epNum, type) : null;
+    let source = 'flikhub';
+    if (!stream && id) {
+      stream = await getStreamFromMegaplay(id, epNum, type);
+      source = 'megaplay';
+    }
     if (!stream) return res.status(502).json({ error: 'Stream extraction failed' });
 
-    let title = null;
-    if (anilistId) {
-      const alInfo = await getAnilistInfo(parseInt(anilistId));
-      title = alInfo?.title;
+    if (!info && mal) {
+      try { info = await getJikanInfo(mal); } catch { /* title is optional */ }
     }
 
     return res.json({
-      anilistId: id,
-      malId: malId ? parseInt(malId) : null,
-      title,
+      anilistId: id || info?.anilistId || null,
+      malId: mal || info?.malId || null,
+      title: info?.title || null,
       episode: epNum,
       type,
-      source: 'megaplay',
+      source,
       m3u8: stream.m3u8,
       subtitles: stream.subtitles,
       intro: stream.intro,
