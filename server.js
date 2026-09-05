@@ -14,6 +14,7 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MEGAPLAY = 'https://megaplay.buzz';
 const FLIKHUB = 'https://api.flikhub.net';
 const JIKAN = 'https://api.jikan.moe/v4';
+const KITSU = 'https://kitsu.io/api/edge';
 
 const anilistClient = axios.create({
   baseURL: 'https://graphql.anilist.co',
@@ -24,6 +25,11 @@ const jikanClient = axios.create({
   baseURL: JIKAN,
   timeout: 10000,
   headers: { 'User-Agent': UA },
+});
+const kitsuClient = axios.create({
+  baseURL: KITSU,
+  timeout: 10000,
+  headers: { Accept: 'application/vnd.api+json' },
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -141,10 +147,43 @@ async function searchJikan(query) {
   if (c) return c;
   const res = await jikanClient.get('/anime', { params: { q: query, limit: 10, sfw: true } });
   const results = (res.data?.data || []).map(a => ({
-    id: null, malId: a.mal_id ?? null, title: a.title_english || a.title,
+    id: a.mal_id ?? null, malId: a.mal_id ?? null, title: a.title_english || a.title,
     coverImage: a.images?.jpg?.large_image_url || a.images?.jpg?.image_url || '',
     episodes: a.episodes ?? null, status: a.status, format: a.type,
   }));
+  cacheSet(ck, results, 300000);
+  return results;
+}
+
+async function searchKitsu(query) {
+  const ck = `kitsu-search:${query.toLowerCase().trim()}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+
+  const res = await kitsuClient.get('/anime', {
+    params: {
+      'filter[text]': query,
+      'page[limit]': 10,
+      include: 'mappings',
+    },
+  });
+  const included = new Map((res.data?.included || []).map(item => [item.id, item]));
+  const results = (res.data?.data || []).map(anime => {
+    const mappingIds = anime.relationships?.mappings?.data || [];
+    const malMapping = mappingIds
+      .map(mapping => included.get(mapping.id))
+      .find(mapping => mapping?.attributes?.externalSite === 'myanimelist/anime');
+    const attributes = anime.attributes || {};
+    return {
+      id: malMapping?.attributes?.externalId ? parseInt(malMapping.attributes.externalId, 10) : null,
+      malId: malMapping?.attributes?.externalId ? parseInt(malMapping.attributes.externalId, 10) : null,
+      title: attributes.titles?.en || attributes.canonicalTitle || 'Unknown',
+      coverImage: attributes.posterImage?.large || attributes.posterImage?.original || '',
+      episodes: attributes.episodeCount ?? null,
+      status: attributes.status === 'current' ? 'RELEASING' : attributes.status,
+      format: attributes.subtype || 'TV',
+    };
+  }).filter(result => result.malId);
   cacheSet(ck, results, 300000);
   return results;
 }
@@ -315,7 +354,7 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', version: '3.0.0', source: 'megaplay' });
+  res.json({ status: 'ok', version: '3.0.0', source: 'flikhub', catalog: ['anilist', 'jikan', 'kitsu'] });
 });
 
 // Search AniList
@@ -328,8 +367,14 @@ app.get('/api/search', async (req, res) => {
       return res.json({ query: q, count: results.length, results, source: 'anilist' });
     } catch (anilistError) {
       console.error('[anilist] Search failed, using Jikan:', anilistError.message);
-      const results = await searchJikan(q);
-      return res.json({ query: q, count: results.length, results, source: 'jikan' });
+      try {
+        const results = await searchJikan(q);
+        return res.json({ query: q, count: results.length, results, source: 'jikan' });
+      } catch (jikanError) {
+        console.error('[jikan] Search failed, using Kitsu:', jikanError.message);
+        const results = await searchKitsu(q);
+        return res.json({ query: q, count: results.length, results, source: 'kitsu' });
+      }
     }
   } catch (e) {
     return res.status(500).json({ error: 'Search failed', detail: e?.message });
