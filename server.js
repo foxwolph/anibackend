@@ -21,12 +21,17 @@ const anilistClient = axios.create({
 // CACHE
 // ══════════════════════════════════════════════════════════════
 const cache = new Map();
+const MAX_CACHE_SIZE = 500;
 function cacheGet(key) {
   const e = cache.get(key);
   if (!e || e.expiresAt < Date.now()) { cache.delete(key); return null; }
   return e.data;
 }
 function cacheSet(key, data, ttlMs = 300000) {
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = cache.keys().next().value;
+    cache.delete(firstKey);
+  }
   cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
@@ -144,34 +149,73 @@ async function getStreamFromMegaplay(anilistId, episode, language = 'sub') {
   }
 }
 
-// Probe episode count by testing successive episodes
-async function probeEpisodeCount(anilistId, maxEps = 500) {
+// Probe if dub is available for an anime (test first episode)
+async function probeDubAvailability(anilistId) {
+  const ck = `dub:${anilistId}`;
+  const c = cacheGet(ck);
+  if (c !== null) return c;
+
+  try {
+    const streamUrl = `${MEGAPLAY}/stream/ani/${anilistId}/1/dub`;
+    const pageRes = await axios.get(streamUrl, {
+      headers: { 'User-Agent': UA, Referer: `${MEGAPLAY}/` },
+      timeout: 5000,
+    });
+    const hasFile = /<title>File \d+/.test(pageRes.data);
+    cacheSet(ck, hasFile, 86400000);
+    return hasFile;
+  } catch {
+    cacheSet(ck, false, 86400000);
+    return false;
+  }
+}
+
+// Probe episode count using binary search
+async function probeEpisodeCount(anilistId, maxEps = 1500) {
   const ck = `probe:${anilistId}`;
   const c = cacheGet(ck);
   if (c !== null) return c;
 
-  let lastValid = 0;
-  // Binary search would be faster, but for now just probe forward
-  for (let ep = 1; ep <= maxEps; ep++) {
+  async function hasEpisode(ep) {
     try {
       const streamUrl = `${MEGAPLAY}/stream/ani/${anilistId}/${ep}/sub`;
       const pageRes = await axios.get(streamUrl, {
         headers: { 'User-Agent': UA, Referer: `${MEGAPLAY}/` },
         timeout: 5000,
       });
-      const hasFile = /<title>File \d+/.test(pageRes.data);
-      if (hasFile) {
-        lastValid = ep;
-      } else {
-        break;
-      }
+      return /<title>File \d+/.test(pageRes.data);
     } catch {
-      break;
+      return false;
     }
   }
 
-  cacheSet(ck, lastValid, 86400000);
-  return lastValid;
+  // First check if episode 1 exists
+  if (!(await hasEpisode(1))) {
+    cacheSet(ck, 0, 86400000);
+    return 0;
+  }
+
+  // Find upper bound by doubling
+  let low = 1;
+  let high = 1;
+  while (high <= maxEps && await hasEpisode(high)) {
+    low = high;
+    high *= 2;
+  }
+  high = Math.min(high, maxEps);
+
+  // Binary search between low and high
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    if (await hasEpisode(mid)) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  cacheSet(ck, low, 86400000);
+  return low;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -212,13 +256,19 @@ app.get('/api/info', async (req, res) => {
     const id = alInfo?.anilistId ?? parseInt(anilistId);
     const totalEps = alInfo?.totalEpisodes;
 
-    // If AniList doesn't have episode count, probe from megaplay
     let episodeCount = totalEps;
-    if (!episodeCount) {
-      episodeCount = await probeEpisodeCount(id);
+    // Always probe if AniList count is missing, 0, or suspiciously low (< 200)
+    // This catches shows like One Piece where AniList reports wrong count
+    if (!episodeCount || episodeCount < 200) {
+      const probedCount = await probeEpisodeCount(id, 1500);
+      if (probedCount > (episodeCount || 0)) {
+        episodeCount = probedCount;
+      }
     }
 
     if (!episodeCount) return res.status(404).json({ error: 'No episodes found on streaming source' });
+
+    const hasDub = await probeDubAvailability(id);
 
     const episodes = [];
     for (let i = 1; i <= episodeCount; i++) {
@@ -231,6 +281,7 @@ app.get('/api/info', async (req, res) => {
       title: alInfo?.title ?? 'Unknown',
       coverImage: alInfo?.coverImage || null,
       episodeCount,
+      hasDub,
       episodes,
     });
   } catch (e) {
@@ -283,8 +334,10 @@ app.get('/api/proxy/hls', async (req, res) => {
 
   try {
     const ref = req.query.ref || `${MEGAPLAY}/`;
+    const isM3u8 = url.includes('.m3u8') || (req.query.type || '').includes('mpegurl');
+
     const upstream = await axios.get(url, {
-      responseType: 'text',
+      responseType: isM3u8 ? 'text' : 'arraybuffer',
       timeout: 15000,
       headers: { 'User-Agent': UA, Referer: ref, Origin: new URL(ref).origin },
     });
@@ -292,9 +345,10 @@ app.get('/api/proxy/hls', async (req, res) => {
     let body = upstream.data;
     const contentType = upstream.headers['content-type'] ?? '';
 
-    if (url.includes('.m3u8') || contentType.includes('mpegurl')) {
+    if (isM3u8 || contentType.includes('mpegurl')) {
+      if (typeof body !== 'string') body = body.toString('utf-8');
       const base = url.substring(0, url.lastIndexOf('/') + 1);
-      const proxyBase = `${req.protocol}://${req.get('host')}/api/proxy/hls`;
+      const proxyBase = `https://${req.get('host')}/api/proxy/hls`;
       body = body.split('\n').map(line => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) {
