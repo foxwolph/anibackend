@@ -523,6 +523,26 @@ app.get('/api/watch', async (req, res) => {
     }
     if (!stream) return res.status(502).json({ error: 'Stream extraction failed' });
 
+    // Best-effort alternate from the other provider on a different CDN, so
+    // clients can fail over when the primary mapping is blocked or poisoned.
+    const alternates = [];
+    try {
+      if (source === 'flikhub' && id) {
+        const alt = await getStreamFromMegaplay(id, epNum, type);
+        if (alt?.m3u8) alternates.push({ source: 'megaplay', m3u8: alt.m3u8, referer: `${MEGAPLAY}/` });
+      } else if (source === 'megaplay' && mal) {
+        const alt = await getStreamFromFlikHub(mal, epNum, type);
+        if (alt?.m3u8) alternates.push({
+          source: 'flikhub',
+          m3u8: alt.m3u8,
+          proxiedUrl: alt.proxiedUrl || null,
+          referer: alt.referer || `${MEGAPLAY}/`,
+        });
+      }
+    } catch (e) {
+      console.error('[watch] Alternate source lookup failed:', e.message);
+    }
+
     if (!info && mal) {
       try { info = await getJikanInfo(mal); } catch { /* title is optional */ }
     }
@@ -540,6 +560,7 @@ app.get('/api/watch', async (req, res) => {
       // /api/proxy/hls as a fallback when the provider proxy URL is blocked.
       directM3u8: unwrapProxyUrl(stream.proxiedUrl || stream.m3u8 || '') || null,
       referer: stream.referer || null,
+      alternates,
       subtitles: stream.subtitles,
       intro: stream.intro,
       outro: stream.outro,
