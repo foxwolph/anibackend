@@ -262,6 +262,8 @@ async function getStreamFromFlikHub(malId, episode, language = 'sub') {
     if (!m3u8) return null;
     const result = {
       m3u8,
+      proxiedUrl: data.proxiedUrl || null,
+      referer: 'https://megaplay.buzz/',
       subtitles: (data.tracks || data.subtitles || []).filter(t => t?.file || t?.url).map(t => ({
         lang: t.label || t.lang || 'Unknown', url: t.file || t.url,
         default: Boolean(t.default), kind: t.kind || 'captions',
@@ -479,6 +481,8 @@ app.get('/api/watch', async (req, res) => {
       type,
       source,
       m3u8: stream.m3u8,
+      proxiedUrl: stream.proxiedUrl || null,
+      referer: stream.referer || null,
       subtitles: stream.subtitles,
       intro: stream.intro,
       outro: stream.outro,
