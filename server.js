@@ -438,10 +438,19 @@ app.get('/api/search', async (req, res) => {
 });
 
 // Get anime info + episode list
+const infoCache = new Map();
+const INFO_TTL = 10 * 60 * 1000;
 app.get('/api/info', async (req, res) => {
   const { anilistId, malId } = req.query;
   if (!anilistId && !malId) return res.status(400).json({ error: 'Provide ?anilistId= or ?malId=' });
+  const cacheKey = `info:${anilistId || ''}:${malId || ''}`;
+  const cached = infoCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return res.json({ ...cached.data, cached: true });
+  }
   try {
+    // AniList GraphQL is authoritative for the ID lookup; Jikan stays as
+    // the malId-path fallback below.
     let alInfo = null;
     let jikanInfo = null;
     if (anilistId) {
@@ -461,25 +470,27 @@ app.get('/api/info', async (req, res) => {
     const totalEps = info?.totalEpisodes;
 
     let episodeCount = totalEps;
+    const needProbe = id && (!episodeCount || episodeCount < 200);
+    // Episode-count probing (binary search over HTTP) and the dub probe are
+    // independent — run them concurrently instead of sequentially.
+    const [probedCount, hasDub] = await Promise.all([
+      needProbe ? probeEpisodeCount(id, 1500) : Promise.resolve(0),
+      id ? probeDubAvailability(id) : Promise.resolve(false),
+    ]);
     // Always probe if AniList count is missing, 0, or suspiciously low (< 200)
     // This catches shows like One Piece where AniList reports wrong count
-    if (id && (!episodeCount || episodeCount < 200)) {
-      const probedCount = await probeEpisodeCount(id, 1500);
-      if (probedCount > (episodeCount || 0)) {
-        episodeCount = probedCount;
-      }
+    if (needProbe && probedCount > (episodeCount || 0)) {
+      episodeCount = probedCount;
     }
 
     if (!episodeCount) return res.status(404).json({ error: 'No episodes found on streaming source' });
-
-    const hasDub = id ? await probeDubAvailability(id) : false;
 
     const episodes = [];
     for (let i = 1; i <= episodeCount; i++) {
       episodes.push({ num: i, title: `Episode ${i}`, thumbnail: info?.coverImage || null });
     }
 
-    return res.json({
+    const payload = {
       anilistId: info?.anilistId ?? (anilistId ? parseInt(anilistId) : null),
       malId: info?.malId ?? (malId ? parseInt(malId) : null),
       title: info?.title ?? 'Unknown',
@@ -487,7 +498,13 @@ app.get('/api/info', async (req, res) => {
       episodeCount,
       hasDub,
       episodes,
-    });
+    };
+    infoCache.set(cacheKey, { data: payload, expiresAt: Date.now() + INFO_TTL });
+    if (infoCache.size > 500) {
+      const firstKey = infoCache.keys().next().value;
+      infoCache.delete(firstKey);
+    }
+    return res.json(payload);
   } catch (e) {
     return res.status(500).json({ error: String(e) });
   }
