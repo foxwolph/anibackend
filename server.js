@@ -50,6 +50,60 @@ function cacheSet(key, data, ttlMs = 300000) {
   cache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
+// Extract the direct CDN playlist URL from a provider proxy wrapper
+// (e.g. https://proxy.flikhub.net/m3u8-proxy?url=<direct>&headers=...).
+// Proxy hosts often block datacenter IPs, so server-side consumers
+// (ffmpeg, axios) must fetch the direct URL instead.
+function unwrapProxyUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'proxy.flikhub.net' && u.pathname.startsWith('/m3u8-proxy')) {
+      const inner = u.searchParams.get('url');
+      if (inner && /^https?:\/\//i.test(inner)) return inner;
+    }
+  } catch { /* fall through and return the original */ }
+  return url;
+}
+
+const IMAGE_SEGMENT_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'image']);
+
+function segmentLooksLikeMedia(uri) {
+  const path = (uri.split('?')[0].split('#')[0] || '').toLowerCase();
+  const dot = path.lastIndexOf('.');
+  if (dot < 0) return true; // extensionless URIs can't be judged; assume media
+  return !IMAGE_SEGMENT_EXT.has(path.substring(dot + 1));
+}
+
+// Best-effort check that an HLS playlist (master or media) ultimately
+// references at least one real media segment. Resolves one master->variant
+// level. Returns true when undecidable so callers can still try ffmpeg.
+async function playlistHasMediaSegments(playlistUrl, playlistText, ref) {
+  const lines = playlistText.split('\n').map(l => l.trim());
+  const uris = lines.filter(l => l && !l.startsWith('#'));
+  const isMaster = lines.some(l => l.startsWith('#EXT-X-STREAM-INF:'));
+  if (!isMaster) {
+    if (uris.length === 0) return true;
+    return uris.some(segmentLooksLikeMedia);
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith('#EXT-X-STREAM-INF:')) continue;
+    const next = lines[i + 1];
+    if (!next || next.startsWith('#')) continue;
+    const variantUrl = next.startsWith('http') ? next : new URL(next, playlistUrl).toString();
+    const variantRes = await axios.get(variantUrl, {
+      responseType: 'text',
+      timeout: 15000,
+      maxContentLength: 4 * 1024 * 1024,
+      headers: { 'User-Agent': UA, Referer: ref, Origin: new URL(ref).origin },
+    });
+    const variantText = typeof variantRes.data === 'string' ? variantRes.data : '';
+    const variantUris = variantText.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    if (variantUris.length === 0) continue;
+    return variantUris.some(segmentLooksLikeMedia);
+  }
+  return true;
+}
+
 // ══════════════════════════════════════════════════════════════
 // ANILIST
 // ══════════════════════════════════════════════════════════════
@@ -482,6 +536,9 @@ app.get('/api/watch', async (req, res) => {
       source,
       m3u8: stream.m3u8,
       proxiedUrl: stream.proxiedUrl || null,
+      // Direct CDN playlist (unwrapped). Clients can route this through
+      // /api/proxy/hls as a fallback when the provider proxy URL is blocked.
+      directM3u8: unwrapProxyUrl(stream.proxiedUrl || stream.m3u8 || '') || null,
       referer: stream.referer || null,
       subtitles: stream.subtitles,
       intro: stream.intro,
@@ -493,7 +550,7 @@ app.get('/api/watch', async (req, res) => {
 });
 
 // Convert one HLS stream to a single MPEG-TS file for native background downloads.
-app.get('/api/download/hls', (req, res) => {
+app.get('/api/download/hls', async (req, res) => {
   const url = req.query.url;
   if (!url || !/^https?:\/\//i.test(url)) {
     return res.status(400).json({ error: 'Missing or invalid ?url=' });
@@ -506,6 +563,43 @@ app.get('/api/download/hls', (req, res) => {
     return res.status(400).json({ error: 'Invalid referrer' });
   }
 
+  // flikhub m3u8-proxy blocks datacenter IPs (403), which makes ffmpeg exit
+  // with zero output while we already sent 200 headers. Unwrap to the direct
+  // CDN playlist URL so ffmpeg fetches the stream itself.
+  const inputUrl = unwrapProxyUrl(url);
+
+  // Pre-probe the playlist before sending 200 headers: if the upstream is
+  // unreachable we can still return a proper JSON error instead of an
+  // empty 200 body that clients can only detect via a size guard.
+  let probeText = '';
+  try {
+    const probe = await axios.get(inputUrl, {
+      responseType: 'text',
+      timeout: 15000,
+      maxContentLength: 2 * 1024 * 1024,
+      headers: { 'User-Agent': UA, Referer: ref, Origin: new URL(ref).origin },
+    });
+    probeText = typeof probe.data === 'string' ? probe.data : '';
+  } catch (e) {
+    console.error('HLS download probe failed:', inputUrl, e.message);
+    return res.status(502).json({ error: 'Upstream playlist unreachable', detail: e?.message });
+  }
+
+  // Guard against poisoned playlists whose segments are ad images (e.g.
+  // signed tiktokcdn .image URLs) instead of media: ffmpeg would exit with
+  // zero output after we already sent 200 headers. Fail fast as JSON so
+  // clients can fall back to another source.
+  try {
+    const hasMedia = await playlistHasMediaSegments(inputUrl, probeText, ref);
+    if (!hasMedia) {
+      console.error('HLS download has no media segments:', inputUrl);
+      return res.status(502).json({ error: 'Playlist contains no downloadable media segments' });
+    }
+  } catch (e) {
+    console.error('HLS download media check failed:', inputUrl, e.message);
+    // Continue and let ffmpeg try; the byte guard below still applies.
+  }
+
   res.setHeader('Content-Type', 'video/mp2t');
   res.setHeader('Content-Disposition', 'attachment; filename="episode.ts"');
   res.setHeader('Cache-Control', 'no-store');
@@ -516,13 +610,15 @@ app.get('/api/download/hls', (req, res) => {
     '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
     '-user_agent', UA,
     '-headers', `Referer: ${ref}\r\nOrigin: ${new URL(ref).origin}\r\n`,
-    '-i', url,
+    '-i', inputUrl,
     '-map', '0',
     '-c', 'copy',
     '-f', 'mpegts',
     'pipe:1',
   ]);
 
+  let bytesOut = 0;
+  ffmpeg.stdout.on('data', (chunk) => { bytesOut += chunk.length; });
   ffmpeg.stdout.pipe(res);
   ffmpeg.stderr.on('data', data => console.error('HLS download ffmpeg:', data.toString().trim()));
   ffmpeg.on('error', error => {
@@ -531,6 +627,7 @@ app.get('/api/download/hls', (req, res) => {
     else res.destroy(error);
   });
   ffmpeg.on('close', code => {
+    console.log(`HLS download ffmpeg exited code=${code} bytes=${bytesOut} url=${inputUrl}`);
     if (code !== 0 && !res.destroyed) res.destroy(new Error(`ffmpeg exited with ${code}`));
   });
   req.on('close', () => {
