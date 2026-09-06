@@ -112,22 +112,27 @@ async function getAnilistInfo(anilistId) {
   const c = cacheGet(ck);
   if (c) return c;
 
-  const query = `query ($id: Int) {
-    Media(id: $id, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
-  }`;
-  const res = await anilistClient.post('', { query, variables: { id: anilistId } });
-  const m = res.data?.data?.Media;
-  if (!m) return null;
-  const result = {
-    anilistId: m.id,
-    malId: m.idMal,
-    title: m.title?.english || m.title?.romaji || 'Unknown',
-    altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title?.romaji ? m.title?.romaji : null,
-    totalEpisodes: m.episodes,
-    coverImage: m.coverImage?.large || null,
-  };
-  cacheSet(ck, result, 86400000);
-  return result;
+  try {
+    const query = `query ($id: Int) {
+      Media(id: $id, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
+    }`;
+    const res = await anilistClient.post('', { query, variables: { id: anilistId } });
+    const m = res.data?.data?.Media;
+    if (!m) return null;
+    const result = {
+      anilistId: m.id,
+      malId: m.idMal,
+      title: m.title?.english || m.title?.romaji || 'Unknown',
+      altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title?.romaji ? m.title?.romaji : null,
+      totalEpisodes: m.episodes,
+      coverImage: m.coverImage?.large || null,
+    };
+    cacheSet(ck, result, 86400000);
+    return result;
+  } catch (e) {
+    console.error(`[anilist] getAnilistInfo failed for ${anilistId}:`, e.message);
+    return null;
+  }
 }
 
 async function searchAnilist(query) {
@@ -164,19 +169,24 @@ async function getAnilistInfoByMalId(malId) {
   const ck = `al-mal:${malId}`;
   const c = cacheGet(ck);
   if (c) return c;
-  const query = `query ($idMal: Int) {
-    Media(idMal: $idMal, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
-  }`;
-  const res = await anilistClient.post('', { query, variables: { idMal: malId } });
-  const m = res.data?.data?.Media;
-  if (!m) return null;
-  const result = {
-    anilistId: m.id, malId: m.idMal, title: m.title?.english || m.title?.romaji || 'Unknown',
-    altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title.romaji ? m.title.romaji : null,
-    totalEpisodes: m.episodes, coverImage: m.coverImage?.large || null,
-  };
-  cacheSet(ck, result, 86400000);
-  return result;
+  try {
+    const query = `query ($idMal: Int) {
+      Media(idMal: $idMal, type: ANIME) { id idMal title { romaji english } episodes coverImage { large } }
+    }`;
+    const res = await anilistClient.post('', { query, variables: { idMal: malId } });
+    const m = res.data?.data?.Media;
+    if (!m) return null;
+    const result = {
+      anilistId: m.id, malId: m.idMal, title: m.title?.english || m.title?.romaji || 'Unknown',
+      altTitle: m.title?.english && m.title?.romaji && m.title?.english !== m.title.romaji ? m.title.romaji : null,
+      totalEpisodes: m.episodes, coverImage: m.coverImage?.large || null,
+    };
+    cacheSet(ck, result, 86400000);
+    return result;
+  } catch (e) {
+    console.error(`[anilist] getAnilistInfoByMalId failed for ${malId}:`, e.message);
+    return null;
+  }
 }
 
 async function getJikanInfo(malId) {
@@ -240,6 +250,73 @@ async function searchKitsu(query) {
   }).filter(result => result.malId);
   cacheSet(ck, results, 300000);
   return results;
+}
+
+async function getKitsuInfoByAnilistId(anilistId) {
+  const ck = `kitsu-al:${anilistId}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  try {
+    const res = await kitsuClient.get('/mappings', {
+      params: {
+        'filter[external_site]': 'anilist/anime',
+        'filter[external_id]': anilistId,
+        include: 'item',
+      },
+    });
+    const item = (res.data?.included || []).find(x => x.type === 'anime');
+    if (!item) return null;
+    const attr = item.attributes || {};
+    let malId = null;
+    const malMapping = (res.data?.included || []).find(x => x.type === 'mappings' && x.attributes?.externalSite === 'myanimelist/anime');
+    if (malMapping?.attributes?.externalId) {
+      malId = parseInt(malMapping.attributes.externalId, 10);
+    }
+    const result = {
+      anilistId,
+      malId,
+      title: attr.titles?.en || attr.canonicalTitle || 'Unknown',
+      altTitle: attr.titles?.en_jp || attr.titles?.ja_jp || null,
+      totalEpisodes: attr.episodeCount || null,
+      coverImage: attr.posterImage?.large || attr.posterImage?.medium || null,
+    };
+    cacheSet(ck, result, 86400000);
+    return result;
+  } catch (e) {
+    console.error(`[kitsu] getKitsuInfoByAnilistId failed for ${anilistId}:`, e.message);
+    return null;
+  }
+}
+
+async function getKitsuInfoByMalId(malId) {
+  const ck = `kitsu-mal:${malId}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  try {
+    const res = await kitsuClient.get('/mappings', {
+      params: {
+        'filter[external_site]': 'myanimelist/anime',
+        'filter[external_id]': malId,
+        include: 'item',
+      },
+    });
+    const item = (res.data?.included || []).find(x => x.type === 'anime');
+    if (!item) return null;
+    const attr = item.attributes || {};
+    const result = {
+      anilistId: null,
+      malId,
+      title: attr.titles?.en || attr.canonicalTitle || 'Unknown',
+      altTitle: attr.titles?.en_jp || attr.titles?.ja_jp || null,
+      totalEpisodes: attr.episodeCount || null,
+      coverImage: attr.posterImage?.large || attr.posterImage?.medium || null,
+    };
+    cacheSet(ck, result, 86400000);
+    return result;
+  } catch (e) {
+    console.error(`[kitsu] getKitsuInfoByMalId failed for ${malId}:`, e.message);
+    return null;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -449,24 +526,32 @@ app.get('/api/info', async (req, res) => {
     return res.json({ ...cached.data, cached: true });
   }
   try {
-    // AniList GraphQL is authoritative for the ID lookup; Jikan stays as
-    // the malId-path fallback below.
+    // AniList GraphQL is authoritative for the ID lookup; Kitsu/Jikan stay
+    // as fallback options when AniList is unavailable.
     let alInfo = null;
     let jikanInfo = null;
+    let kitsuInfo = null;
     if (anilistId) {
-      alInfo = await getAnilistInfo(parseInt(anilistId));
-      if (!alInfo) return res.status(404).json({ error: 'Anime not found on AniList' });
+      const parsedAlId = parseInt(anilistId);
+      alInfo = await getAnilistInfo(parsedAlId);
+      if (!alInfo) {
+        kitsuInfo = await getKitsuInfoByAnilistId(parsedAlId);
+        if (kitsuInfo?.malId) {
+          try { jikanInfo = await getJikanInfo(kitsuInfo.malId); } catch {}
+        }
+      }
     } else if (malId) {
       const parsedMalId = parseInt(malId);
       try { alInfo = await getAnilistInfoByMalId(parsedMalId); } catch (e) {
         console.error('[anilist] MAL lookup failed, using Jikan:', e.message);
       }
       if (!alInfo) jikanInfo = await getJikanInfo(parsedMalId);
-      if (!alInfo && !jikanInfo) return res.status(404).json({ error: 'Anime not found' });
+      if (!alInfo && !jikanInfo) kitsuInfo = await getKitsuInfoByMalId(parsedMalId);
     }
 
-    const id = alInfo?.anilistId ?? (anilistId ? parseInt(anilistId) : null);
-    const info = alInfo || jikanInfo;
+    const info = alInfo || jikanInfo || kitsuInfo;
+    const id = info?.anilistId ?? (anilistId ? parseInt(anilistId) : null);
+    const resolvedMal = info?.malId ?? (malId ? parseInt(malId) : null);
     const totalEps = info?.totalEpisodes;
 
     let episodeCount = totalEps;
@@ -483,7 +568,10 @@ app.get('/api/info', async (req, res) => {
       episodeCount = probedCount;
     }
 
-    if (!episodeCount) return res.status(404).json({ error: 'No episodes found on streaming source' });
+    if (!episodeCount && !probedCount) {
+      return res.status(404).json({ error: 'No episodes found on streaming source' });
+    }
+    if (!episodeCount) episodeCount = probedCount;
 
     const episodes = [];
     for (let i = 1; i <= episodeCount; i++) {
@@ -491,9 +579,9 @@ app.get('/api/info', async (req, res) => {
     }
 
     const payload = {
-      anilistId: info?.anilistId ?? (anilistId ? parseInt(anilistId) : null),
-      malId: info?.malId ?? (malId ? parseInt(malId) : null),
-      title: info?.title ?? 'Unknown',
+      anilistId: id,
+      malId: resolvedMal,
+      title: info?.title ?? (id ? `Anime #${id}` : 'Unknown'),
       coverImage: info?.coverImage || null,
       episodeCount,
       hasDub,
@@ -528,6 +616,15 @@ app.get('/api/watch', async (req, res) => {
         if (!mal) mal = info?.malId || null;
       } catch (e) {
         console.error('[anilist] Info lookup failed:', e.message);
+      }
+      if (!mal && id) {
+        try {
+          const kInfo = await getKitsuInfoByAnilistId(id);
+          if (kInfo?.malId) {
+            mal = kInfo.malId;
+            if (!info) info = kInfo;
+          }
+        } catch {}
       }
     }
     if (!id && !mal) return res.status(400).json({ error: 'A valid anilistId or malId is required for streaming' });
